@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "reify": {
+      "command": "/abs/path/to/reify/.venv/bin/reify",
+      "args": ["serve"]
+    }
+  }
+}

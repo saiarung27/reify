@@ -1,0 +1,13 @@
+{
+  "name": "reify-node-example",
+  "version": "0.1.0",
+  "description": "Example Node.js application using Reify REST API",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "node-fetch": "^3.3.2"
+  }
+}
