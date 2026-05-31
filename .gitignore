@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environments
+.venv/
+venv/
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Reify data
+.reify/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Eval artifacts
+eval_results/
+benchmarks/cache/
+longmemeval_oracle*.json
+
+# Models
+.fastembed/
+*.onnx
+*.gguf
+
+# Node.js
+node_modules/
+
+# Launch/social drafts — local working files, not part of the public repo
+marketing/

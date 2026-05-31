@@ -1,0 +1,124 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reify"
+version = "0.1.0.dev0"
+description = "A model-portable cognitive substrate for AI."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [{ name = "Reify contributors" }]
+keywords = ["ai", "memory", "llm", "agent", "context", "mcp", "rag"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "pydantic>=2.7",
+  "pydantic-settings>=2.3",
+  "python-ulid>=2.7",
+  "sqlite-vec>=0.1.6",
+  "numpy>=1.26",
+  "httpx>=0.27",
+  "anyio>=4.4",
+  "typer>=0.12",
+  "rich>=13.7",
+]
+
+[project.optional-dependencies]
+embed = [
+  "fastembed>=0.3",
+]
+openai = [
+  "openai>=1.40",
+]
+anthropic = [
+  "anthropic>=0.34",
+]
+ollama = [
+  "ollama>=0.3",
+]
+mcp = [
+  "mcp>=1.0",
+]
+server = [
+  "fastapi>=0.110",
+  "uvicorn[standard]>=0.30",
+]
+eval = [
+  "datasets>=2.20",
+  "pandas>=2.2",
+]
+all = [
+  "reify[embed,openai,anthropic,ollama,mcp,server,eval]",
+]
+dev = [
+  "reify[all]",
+  "pytest>=8.2",
+  "pytest-asyncio>=0.23",
+  "pytest-cov>=5.0",
+  "ruff>=0.5",
+  "mypy>=1.10",
+  "pre-commit>=3.7",
+]
+
+[project.scripts]
+reify = "reify.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/saiarung27/reify"
+Documentation = "https://github.com/saiarung27/reify/blob/main/ARCHITECTURE.md"
+Issues = "https://github.com/saiarung27/reify/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reify"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/reify", "README.md", "ARCHITECTURE.md", "ROADMAP.md", "LICENSE"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["B011"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["sqlite_vec.*", "fastembed.*", "ollama.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+
+[tool.coverage.run]
+source = ["src/reify"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

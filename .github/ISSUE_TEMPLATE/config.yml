@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/saiarung27/reify/security/advisories/new
+    about: Please report security issues privately via a GitHub Security Advisory, not a public issue. See SECURITY.md.
+  - name: Documentation
+    url: https://github.com/saiarung27/reify/blob/main/README.md
+    about: Read the README, ROADMAP, and FIRST_PRINCIPLES first. Most "is this supported?" questions are answered there.
