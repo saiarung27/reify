@@ -40,9 +40,13 @@ class OllamaProvider(LLMProvider):
     def __init__(
         self,
         base_url: str = "http://localhost:11434",
-        timeout: float = 60.0,
+        timeout: float = 180.0,
         default_model: str | None = None,
     ) -> None:
+        # ARW classifications are background work; local inference on a
+        # 7B-8B model can run 30-90s under load (model swap-in, parallel
+        # downloads, CPU contention). 60s was too aggressive and surfaced
+        # as ``ReadTimeout`` errors that were silently dropped by reflect().
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self.default_model = default_model

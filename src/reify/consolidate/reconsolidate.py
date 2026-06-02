@@ -160,7 +160,54 @@ class ARWWorker:
             max_tokens=600,
         )
         response = await self._llm.complete(request)
-        return self._parse_classification_response(response.content, len(candidates))
+        relations = self._parse_classification_response(response.content, len(candidates))
+        # Defensive post-process for smaller / less rule-disciplined models
+        # (e.g., quantized 7B-8B Ollama models). They sometimes return
+        # ``refines`` for what is clearly a supersession on a
+        # mutually-exclusive predicate (you have exactly one current title /
+        # home / employer). Promote those to ``resolves`` so the BTG fires.
+        return self._coerce_exclusive_supersessions(memory, candidates, relations)
+
+    # Predicates where the user can hold exactly one current value at a time.
+    # Two facts with different objects under the same predicate cannot both
+    # remain currently-true; the newer one supersedes the older.
+    _EXCLUSIVE_PREDICATES: frozenset[str] = frozenset(
+        {"has_title", "lives_in", "works_at"}
+    )
+
+    def _coerce_exclusive_supersessions(
+        self,
+        memory: Fact,
+        candidates: list[Fact],
+        relations: list[Relation],
+    ) -> list[Relation]:
+        if memory.predicate not in self._EXCLUSIVE_PREDICATES:
+            return relations
+        coerced: list[Relation] = []
+        for candidate, relation in zip(candidates, relations, strict=True):
+            if (
+                relation.type is RelationType.REFINES
+                and candidate.predicate == memory.predicate
+                and (memory.obj or "").strip().casefold()
+                != (candidate.obj or "").strip().casefold()
+                and (memory.obj or "").strip()
+                and (candidate.obj or "").strip()
+            ):
+                # Discount confidence to reflect that we are second-guessing
+                # the model. Still high enough to clear default thresholds.
+                coerced.append(
+                    Relation(
+                        type=RelationType.RESOLVES,
+                        confidence=max(0.5, min(1.0, relation.confidence * 0.8)),
+                        explanation=(
+                            (relation.explanation or "")
+                            + " [coerced refines→resolves: exclusive predicate]"
+                        ).strip(),
+                    )
+                )
+            else:
+                coerced.append(relation)
+        return coerced
 
     def _build_classification_prompt(self, memory: Fact, candidates: list[Fact]) -> str:
         prompt = """Classify the relation between the NEW fact and each EXISTING fact.
@@ -174,11 +221,22 @@ Allowed relation values:
 - resolves
 
 Rules:
-- Use contradicts for two incompatible current states of the same predicate.
-- Use resolves when the new fact clearly supersedes the older fact as the new current truth.
+- Use contradicts for two incompatible current states of the same predicate
+  (e.g., title=Senior vs title=Staff at the same time).
+- Use resolves when the new fact clearly supersedes the older fact as the new
+  current truth — this is the right answer when a person's title, home, or
+  employer CHANGES over time. The old fact is no longer current.
 - Use confirms when they assert the same state.
-- Use extends or refines only when both can remain true together.
+- Use extends or refines ONLY when both facts can remain currently-true
+  together (e.g., two complementary preferences). A title change, a move,
+  or a new employer is NEVER refines — use resolves.
 - Output JSON array only. Each element must include: type, confidence, explanation.
+
+Examples:
+- NEW "Title: Staff Engineer" vs EXISTING "Title: Senior Engineer" → resolves
+- NEW "Location: Berkeley" vs EXISTING "Location: Oakland" → resolves
+- NEW "Employer: Stripe" vs EXISTING "Employer: Linear" → resolves
+- NEW "Prefers dark mode" vs EXISTING "Prefers vim" → refines (both still true)
 
 NEW fact:
 """
