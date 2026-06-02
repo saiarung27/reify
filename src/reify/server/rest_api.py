@@ -209,7 +209,8 @@ class RestAPI:
 # Create a default app instance for uvicorn
 def create_app() -> FastAPI:
     """Create a default REST API app instance."""
-    from reify.cli import get_settings, _engine_config
+    from reify.config import get_settings
+    from reify.cli import _engine_config
     from reify.storage import SQLiteStore
 
     settings = get_settings()

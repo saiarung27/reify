@@ -45,7 +45,9 @@ def create_llm_provider(spec: str) -> LLMProvider:
             raise ConfigError("OpenAI provider requires OPENAI_API_KEY environment variable. Set it with: export OPENAI_API_KEY=sk-...")
 
         base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        # Disable SSL verification for internal endpoints
+        # Custom OpenAI-compatible endpoints (vLLM, llama.cpp servers, internal
+        # proxies) often present self-signed certs. Skip strict verification
+        # only when the base URL is not the public OpenAI API.
         verify_ssl = "api.openai.com" not in base_url
         return OpenAIProvider(
             api_key=api_key,

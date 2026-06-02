@@ -18,7 +18,7 @@ from mcp.server import Server
 from mcp.server.sse import SseServerTransport
 
 from reify import EngineConfig, Reify
-from reify.cli import get_settings
+from reify.config import get_settings
 from reify.llm import create_llm_provider
 from reify.storage import SQLiteStore
 
