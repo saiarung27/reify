@@ -23,10 +23,13 @@ export interface RememberResponse {
 }
 
 export interface Transition {
-  memory_id: string;
-  from_state: string;
-  to_state: string;
+  id: string;
+  kind: string;
+  from_memory_id: string | null;
+  to_memory_id: string | null;
   at: string;
+  summary?: string;
+  identity_id?: string | null;
 }
 
 export class ReifyClient {

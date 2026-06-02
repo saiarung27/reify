@@ -139,11 +139,11 @@ function App() {
             <p>No transitions found</p>
           ) : (
             <ul className="memory-list">
-              {transitions.map((transition, idx) => (
-                <li key={idx} className="memory-item">
-                  <div>Memory: {transition.memory_id}</div>
+              {transitions.map((transition) => (
+                <li key={transition.id} className="memory-item">
+                  <div>{transition.summary || transition.kind}</div>
                   <div className="memory-meta">
-                    {transition.from_state} → {transition.to_state} • {new Date(transition.at).toLocaleString()}
+                    {transition.from_memory_id ?? '∅'} → {transition.to_memory_id ?? '∅'} • {new Date(transition.at).toLocaleString()}
                   </div>
                 </li>
               ))}
