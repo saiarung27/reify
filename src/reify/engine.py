@@ -51,6 +51,7 @@ from reify.extract import (
     Extractor,
     ExtractionContext,
 )
+from reify.extract.pii_redaction import PIIRedactor
 from reify.llm.base import LLMProvider
 from reify.recall import AggregateIntent, Query, RecallResult, Recaller, TemporalIntent, parse_query, since_window
 from reify.retrieve.ebbinghaus import EbbinghausConfig, apply_ebbinghaus_to_score
@@ -183,6 +184,10 @@ class Reify:
             raise ReifyError("Reify requires at least one extractor")
         self._clock = clock
         self._config = config or EngineConfig()
+        # PII redaction: gated by REIFY_PII_REDACT=on. The redactor is a
+        # cheap pure-regex pass; it returns text unchanged when disabled,
+        # so wiring it unconditionally keeps the no-LLM floor intact.
+        self._pii_redactor = PIIRedactor()
         self._recaller = Recaller(
             storage,
             weights=self._config.recall_weights,
@@ -271,6 +276,9 @@ class Reify:
             identity_id=identity_id,
             now=at or self.now(),
         )
+        # Redact PII before any extractor sees the text. No-op unless
+        # REIFY_PII_REDACT=on; never raises.
+        text = await self._pii_redactor.extract(text, ctx)
         primary = self._extractors[0]
         result = await primary.extract(text, ctx)
         if not result.memories:
