@@ -15,55 +15,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
+from reify.core.types import Identity, IdentityBond
+
 if TYPE_CHECKING:
     from reify import Reify
 
 log = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class Identity:
-    """An identity in the bond graph.
-
-    Identities follow a hierarchy: anonymous → device → user.
-    """
-
-    id: str
-    """Canonical identity ID."""
-
-    kind: str
-    """Identity kind: 'anonymous', 'device', or 'user'."""
-
-    parent_id: str | None = None
-    """Parent identity ID for hierarchical linking."""
-
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-@dataclass(frozen=True, slots=True)
-class IdentityBond:
-    """A bond between two identities with a confidence score.
-
-    Matches the identity_bonds table schema in _schema.sql.
-    """
-
-    from_identity: str
-    """Source identity ID (matches schema column)."""
-
-    to_identity: str
-    """Target identity ID (matches schema column)."""
-
-    confidence: float
-    """Confidence score in [0, 1]."""
-
-    rationale: str = ""
-    """Rationale for the bond (matches schema column)."""
-
-    formed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    """When the bond was formed (matches schema column)."""
-
-    last_reinforced_at: datetime | None = None
-    """When the bond was last reinforced (matches schema column)."""
 
 
 @dataclass(slots=True)

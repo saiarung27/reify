@@ -23,7 +23,7 @@ from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 from reify.engine import Reify, EngineConfig
-from reify.cli import get_settings
+from reify.config import get_settings
 from reify.llm import create_llm_provider
 from reify.storage import SQLiteStore
 
@@ -165,10 +165,10 @@ def register_tools(server: Server, engine: Reify) -> None:
             from reify.identity.bond_graph import IdentityBond
 
             bond = IdentityBond(
-                source_id=arguments["source_id"],
-                target_id=arguments["target_id"],
+                from_identity=arguments["source_id"],
+                to_identity=arguments["target_id"],
                 confidence=arguments.get("confidence", 0.8),
-                signal_type="explicit",
+                rationale="explicit",
             )
             engine._identity_bond_graph.add_bond(bond)
             return [TextContent(type="text", text=f"Linked {arguments['source_id']} to {arguments['target_id']} with confidence {arguments.get('confidence', 0.8)}")]

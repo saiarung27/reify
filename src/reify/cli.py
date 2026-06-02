@@ -700,10 +700,10 @@ def identity_link(
             from reify.identity.bond_graph import IdentityBond
 
             bond = IdentityBond(
-                source_id=identity_a,
-                target_id=identity_b,
+                from_identity=identity_a,
+                to_identity=identity_b,
                 confidence=confidence,
-                signal_type="explicit",
+                rationale="explicit",
             )
             engine._identity_bond_graph.add_bond(bond)
             console.print(f"[green]Linked {identity_a} to {identity_b} with confidence {confidence}[/green]")

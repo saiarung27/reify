@@ -393,6 +393,9 @@ class Identity(BaseModel):
 
     kind: Literal["user", "device", "anonymous"]
     label: str | None = None
+    parent_id: str | None = None
+    """Parent identity for hierarchical linking (e.g., a ``device`` identity
+    may have a ``user`` parent once a high-confidence bond is established)."""
     created_at: datetime = Field(default_factory=_utcnow)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
