@@ -60,6 +60,10 @@ class Query:
     text: str
     keywords: tuple[str, ...] = ()
     tags: tuple[str, ...] = ()
+    # True when the caller supplied tags explicitly (evidence query) rather
+    # than the parser inferring them from query tokens. Explicit tags are
+    # a hard filter and never degrade; inferred tags are hints.
+    tags_explicit: bool = False
     networks: tuple[Network, ...] = ()
     valid_at: datetime | None = None
     identity_id: str | None = None
@@ -343,7 +347,20 @@ class Recaller:
         return ranked[: query.limit]
 
     async def _fetch_candidates(self, query: Query, *, now: datetime) -> list[Memory]:
-        """Storage-side prune. Always applies bitemporal validity at ``now``."""
+        """Storage-side prune. Always applies bitemporal validity at ``now``.
+
+        Inferred tags/networks are hints, not hard constraints: when the
+        tag/network-filtered set is empty AND the query carries content
+        keywords beyond the tag triggers, the prune degrades to the
+        identity-scoped set (bitemporal validity still holds) so lexical
+        scoring can rank instead of returning a silent empty result. A
+        query token can misfire a tag (e.g. "city" inside a business
+        name); that must cost precision, never the whole answer. Two
+        cases deliberately do NOT degrade: explicit caller tags (an
+        evidence query's filter is exact), and queries whose keywords
+        are all tag triggers (the query *is* a tag lookup, e.g. a
+        forget-by-tag verification must not resurrect untagged rows).
+        """
         f = RecallFilter(
             networks=list(query.networks) or None,
             tags_any=list(query.tags) or None,
@@ -351,7 +368,20 @@ class Recaller:
             valid_at=query.valid_at or now,
         )
         primary = await self._storage.recall(f, limit=self._candidate_limit)
-        if primary or query.tags or query.networks or query.identity_id:
+        if primary:
+            return primary
+        if (query.tags or query.networks) and not query.tags_explicit:
+            has_content_keywords = any(
+                k not in _TAG_TRIGGERS and k not in _NETWORK_TRIGGERS
+                for k in query.keywords
+            )
+            if has_content_keywords:
+                degraded = RecallFilter(
+                    identity_ids=[query.identity_id] if query.identity_id else None,
+                    valid_at=query.valid_at or now,
+                )
+                return await self._storage.recall(degraded, limit=self._candidate_limit)
+        if query.tags or query.networks or query.identity_id:
             return primary
         # Fallback: empty filter (just bitemporal) when the parsed query had
         # no structural hints. Returns the most recent memories.

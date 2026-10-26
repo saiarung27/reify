@@ -90,6 +90,7 @@ def remember(
     text: str = typer.Argument(..., help="Text to remember."),
     identity: str = typer.Option(None, "--identity", "-i", help="Identity ID (optional)."),
     at: str = typer.Option(None, "--at", help="Timestamp for the memory (ISO-8601 format)."),
+    tags: list[str] | None = typer.Option(None, "--tag", help="Tag to attach (repeatable)."),
 ) -> None:
     """Ingest a memory into the store."""
     settings = get_settings()
@@ -121,6 +122,7 @@ def remember(
                 source="cli:remember",
                 identity_id=identity,
                 at=at_dt,
+                tags=tuple(tags or ()),
             )
             console.print(f"[green]Committed {len(receipt.committed)} memory(ies)[/green]")
             for m in receipt.committed:
@@ -159,6 +161,7 @@ def recall(
     identity: str = typer.Option(None, "--identity", "-i", help="Scope to identity (optional)."),
     at: str = typer.Option(None, "--at", help="Query as of this timestamp (ISO-8601 format)."),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results to return."),
+    tags: list[str] | None = typer.Option(None, "--tag", help="Filter to memories carrying any of these tags (repeatable; replaces inferred tags)."),
 ) -> None:
     """Run a recall against the local store."""
     settings = get_settings()
@@ -175,7 +178,13 @@ def recall(
                 at_dt = datetime.fromisoformat(at)
                 if at_dt.tzinfo is None:
                     at_dt = at_dt.replace(tzinfo=timezone.utc)
-            response = await engine.recall(query, identity_id=identity, valid_at=at_dt, limit=limit)
+            response = await engine.recall(
+                query,
+                identity_id=identity,
+                valid_at=at_dt,
+                limit=limit,
+                tags=tuple(tags) if tags else None,
+            )
             console.print(f"[bold]Query:[/bold] {response.query.text}")
             console.print(f"[bold]Results:[/bold] {len(response.results)} hit(s)\n")
             for r in response.results:

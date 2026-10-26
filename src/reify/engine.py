@@ -259,12 +259,20 @@ class Reify:
         session_id: str | None = None,
         identity_id: str | None = None,
         at: datetime | None = None,
+        tags: tuple[str, ...] = (),
     ) -> WriteReceipt:
         """The foreground write path.
 
         Runs the first (deterministic) extractor synchronously, commits the
         produced memories, and enqueues claim-like rows in ``pending_arw`` so
         the background ARW worker can pick them up.
+
+        Caller-supplied ``tags`` are merged onto every extracted memory
+        (deduplicated, extractor tags preserved first). They exist for
+        evidence-style retrieval: a caller that knows a memory's section
+        (``pricing``, ``objection``) can tag it at ingest and filter on
+        it exactly at query time via :meth:`recall`'s ``tags`` argument,
+        instead of trusting free-text ranking to surface it.
 
         Returns a :class:`WriteReceipt` describing what landed.
         """
@@ -285,6 +293,15 @@ class Reify:
             return WriteReceipt(committed=())
 
         retained_memories = tuple(self._apply_default_retention(m) for m in result.memories)
+        if tags:
+            extra = tuple(dict.fromkeys(t.strip() for t in tags if t and t.strip()))
+            if extra:
+                retained_memories = tuple(
+                    m.model_copy(
+                        update={"tags": tuple(dict.fromkeys((*m.tags, *extra)))}
+                    )
+                    for m in retained_memories
+                )
 
         # Record activity for sleep scheduler.
         if self._config.sleep_scheduler_enabled:
@@ -322,12 +339,18 @@ class Reify:
         identity_id: str | None = None,
         valid_at: datetime | None = None,
         limit: int = 20,
+        tags: tuple[str, ...] | None = None,
     ) -> RecallResponse:
         """Answer a natural-language question with ranked memories.
 
         Pure metadata-first recall: no LLM in the path. The MCP/HTTP
         surfaces are responsible for any post-processing (e.g.,
         synthesizing a sentence) on the structured payload.
+
+        Explicit ``tags`` replace the tags inferred from the query text.
+        They are the evidence-query path: when the caller already knows
+        the section it wants (``pricing``), filtering on it is exact,
+        where free-text ranking can be swamped by entity mentions.
         """
         self._require_started()
         # Record activity for sleep scheduler.
@@ -342,6 +365,8 @@ class Reify:
             query = _replace(query, identity_id=identity_id)
         if valid_at is not None:
             query = _replace(query, valid_at=valid_at)
+        if tags is not None:
+            query = _replace(query, tags=tuple(tags), tags_explicit=True)
         temporal_results = await self._temporal_recall(query)
         if temporal_results:
             return RecallResponse(query=query, results=tuple(temporal_results[:limit]))
@@ -953,28 +978,35 @@ def _merge_recall_results(
     primary_list = list(primary)
 
     if secondary:
-        if primary_list:
-            min_primary_score = min(r.score for r in primary_list)
-            ceiling = max(min_primary_score - 1e-6, 0.0)
-        else:
-            ceiling = 1.0
-        # Renormalize secondary so the highest secondary score sits at
-        # the ceiling and the remainder spreads proportionally below it.
         secondary_unique = [r for r in secondary if r.memory.id not in primary_ids]
         if secondary_unique:
-            top_secondary = max(r.score for r in secondary_unique) or 1.0
-            scaled: list[RecallResult] = []
-            for r in secondary_unique:
-                scaled_score = (r.score / top_secondary) * ceiling
-                scaled.append(
-                    RecallResult(
-                        memory=r.memory,
-                        score=scaled_score,
-                        matched_stage=r.matched_stage,
+            if primary_list:
+                # Renormalize secondary so the highest secondary score sits
+                # below the lowest primary score and the remainder spreads
+                # proportionally below it.
+                min_primary_score = min(r.score for r in primary_list)
+                ceiling = max(min_primary_score - 1e-6, 0.0)
+                top_secondary = max(r.score for r in secondary_unique) or 1.0
+                scaled: list[RecallResult] = []
+                for r in secondary_unique:
+                    scaled_score = (r.score / top_secondary) * ceiling
+                    scaled.append(
+                        RecallResult(
+                            memory=r.memory,
+                            score=scaled_score,
+                            matched_stage=r.matched_stage,
+                        )
                     )
+                scaled.sort(key=lambda r: r.score, reverse=True)
+                primary_list.extend(scaled)
+            else:
+                # No primary hits: keep secondary scores exactly as produced
+                # (graph-walk results are pre-weighted below 0.5). Scaling
+                # them up to 1.0 here would present a soft graph-only
+                # signal at full confidence.
+                primary_list.extend(
+                    sorted(secondary_unique, key=lambda r: r.score, reverse=True)
                 )
-            scaled.sort(key=lambda r: r.score, reverse=True)
-            primary_list.extend(scaled)
 
     return primary_list[:limit]
 
@@ -985,6 +1017,7 @@ def _replace(q: Query, **changes: Any) -> Query:
         "text": q.text,
         "keywords": q.keywords,
         "tags": q.tags,
+        "tags_explicit": q.tags_explicit,
         "networks": q.networks,
         "valid_at": q.valid_at,
         "identity_id": q.identity_id,
