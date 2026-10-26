@@ -5,6 +5,7 @@ surface backed by local Reify stores. It exists so a Zep-based caller
 (MiroFish) can swap its memory layer without a cloud vendor.
 """
 
+from reify.adapters.relations import LLMRelationExtractor, RelationTriple
 from reify.adapters.zep_graph import ReifyZepGraph
 
-__all__ = ["ReifyZepGraph"]
+__all__ = ["ReifyZepGraph", "LLMRelationExtractor", "RelationTriple"]

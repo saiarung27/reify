@@ -111,3 +111,91 @@ def test_delete_graph_removes_store(adapter, tmp_path):
     assert adapter.delete_graph("sim-1") is True
     assert list((tmp_path / "graphs").glob("sim-1.db")) == []
     assert adapter.get_ontology("sim-1") is None
+
+
+class FakeExtractor:
+    """Deterministic stand-in for LLM extraction."""
+
+    def __init__(self, triples=(), *, fail=False):
+        self._triples = list(triples)
+        self._fail = fail
+        self.calls: list[str] = []
+
+    def extract(self, text):
+        self.calls.append(text)
+        if self._fail:
+            raise RuntimeError("provider down")
+        from reify.adapters.relations import RelationTriple
+
+        return [RelationTriple(*t) for t in self._triples]
+
+
+def test_relation_extraction_adds_typed_edges(adapter, tmp_path):
+    from reify.adapters import ReifyZepGraph
+
+    extractor = FakeExtractor(
+        [("Maya", "would_pay_only_if", "three bookings"),
+         ("Maya", "finds_too_expensive", "99 dollars a month")]
+    )
+    with ReifyZepGraph(tmp_path / "graphs2", relation_extractor=extractor) as a2:
+        a2.create_graph("sim-typed")
+        a2.add_episode(
+            "sim-typed",
+            "Maya says she would pay 99 dollars a month only if three bookings come in.",
+            identity_id="persona-1",
+        )
+        edges = a2.list_edges("sim-typed")
+        relations = {e["relation"] for e in edges}
+        assert "would_pay_only_if" in relations
+        assert "finds_too_expensive" in relations
+        typed = [e for e in edges if e["relation"] == "would_pay_only_if"][0]
+        assert "Maya" in typed["fact"] and "three bookings" in typed["fact"]
+        assert extractor.calls
+
+
+def test_extractor_failure_never_breaks_episode_write(adapter, tmp_path):
+    from reify.adapters import ReifyZepGraph
+
+    with ReifyZepGraph(tmp_path / "graphs3", relation_extractor=FakeExtractor(fail=True)) as a3:
+        a3.create_graph("sim-fail")
+        ep = a3.add_episode("sim-fail", "Maya worries about lead quality.")
+        assert ep["uuid"]
+        assert a3.get_episode("sim-fail", ep["uuid"]) is not None
+
+
+class FakeLLMProvider:
+    """Stand-in for an LLM provider returning a fixed JSON triple list."""
+
+    name = "fake"
+    default_model = "fake-model"
+
+    def __init__(self, content):
+        self.content = content
+        self.seen_prompts: list[str] = []
+
+    async def complete(self, request):
+        self.seen_prompts.append(request.messages[0]["content"])
+        from reify.llm.base import LLMResponse
+
+        return LLMResponse(content=self.content, model="fake-model")
+
+
+def test_llm_extractor_parses_json_triples():
+    """Regression: the prompt template once crashed on its own JSON example
+    (str.format parsed {"subject"} as a placeholder). A fake provider run
+    through the real extractor must yield triples, not []."""
+    import asyncio
+
+    from reify.adapters.relations import LLMRelationExtractor
+
+    provider = FakeLLMProvider(
+        '[{"subject": "Maya", "relation": "finds_too_expensive", '
+        '"object": "99 dollars a month"}]'
+    )
+    extractor = LLMRelationExtractor(provider, model="fake-model")
+    triples = asyncio.run(extractor._extract_async("Maya says 99 dollars is too much."))
+    assert len(triples) == 1
+    assert triples[0].subject == "Maya"
+    assert triples[0].relation == "finds_too_expensive"
+    assert triples[0].object == "99 dollars a month"
+    assert '{"subject"' in provider.seen_prompts[0]

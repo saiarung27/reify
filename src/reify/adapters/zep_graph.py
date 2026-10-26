@@ -19,12 +19,14 @@ Mapping (deliberate, documented where it is lossy):
 * Zep node -> a Reify entity (``entities`` table). Node ids are Reify
   entity slugs (``queen_city_home_refresh``), NOT UUIDs: callers must
   treat them as opaque strings.
-* Zep edge fact -> Reify entity edges, which are co-occurrence edges
-  from the deterministic extractor plus extractor facts. This is the
-  known fidelity gap: Zep's edges are LLM-extracted relations with
-  natural-language facts; Reify's are structural. ``fact`` strings
-  here read as ``"<source> <relation> <target>"`` and must not be
-  presented as LLM-extracted claims.
+* Zep edge fact -> Reify entity edges. Without a relation extractor,
+  edges are deterministic mentions + ``co_occurs`` only. With a
+  ``relation_extractor`` (e.g. :class:`LLMRelationExtractor`), each
+  episode additionally yields typed relation edges, which is the
+  Zep-parity path. ``fact`` strings render with entity labels:
+  ``"<subject label> <relation> <object label>"`` (``co_occurs``
+  renders as ``"<a> co-occurs with <b>"``). Extracted relations are
+  model output, not verified claims -- same caveat as Zep's.
 * Zep batch -> a synchronous in-adapter registry. ``process_batch``
   ingests immediately, so ``get_batch`` reports ``completed`` right
   away. MiroFish's poll loop still works; it just never waits.
@@ -42,12 +44,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import uuid
 from pathlib import Path
 from typing import Any
 
 from reify import EngineConfig, Reify
+from reify.adapters.relations import RelationExtractor
+
+log = logging.getLogger(__name__)
+from reify.retrieve.entities import EntityEdge, canonicalize
 from reify.storage import SQLiteStore
 
 
@@ -69,12 +76,44 @@ def _node_dict(entity: dict[str, Any], summary: str = "") -> dict[str, Any]:
     }
 
 
+def _edge_dict(
+    from_id: str, to_id: str, relation: str, labels: dict[str, str]
+) -> dict[str, Any]:
+    from_label = labels.get(from_id, from_id)
+    to_label = labels.get(to_id, to_id)
+    if relation == "co_occurs":
+        fact = f"{from_label} co-occurs with {to_label}"
+    else:
+        fact = f"{from_label} {relation} {to_label}"
+    return {
+        "source": from_id,
+        "target": to_id,
+        "relation": relation,
+        "fact": fact,
+    }
+
+
 class ReifyZepGraph:
     """Sync Zep-graph-shaped client backed by Reify stores."""
 
-    def __init__(self, root_dir: str | Path) -> None:
+    def __init__(
+        self,
+        root_dir: str | Path,
+        *,
+        relation_extractor: RelationExtractor | None = None,
+    ) -> None:
+        """Create an adapter.
+
+        ``relation_extractor`` is optional and off by default: without
+        it the graph carries deterministic mentions + ``co_occurs``
+        edges only. With it (e.g. :class:`LLMRelationExtractor`), each
+        episode also yields typed relation edges, which is what makes
+        the graph comparable to Zep's LLM-extracted graph. Extraction
+        failures never fail the episode write.
+        """
         self._root = Path(root_dir)
         self._root.mkdir(parents=True, exist_ok=True)
+        self._relation_extractor = relation_extractor
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop_forever, daemon=True)
         self._thread.start()
@@ -187,9 +226,53 @@ class ReifyZepGraph:
             )
             if not receipt.committed:
                 raise ValueError("episode produced no memories (empty extraction)")
+            if self._relation_extractor is not None:
+                await self._extract_relations(engine, content)
             return _episode_dict(receipt.committed[0])
 
         return self._run(_add())
+
+    async def _extract_relations(self, engine: Reify, content: str) -> None:
+        """Best-effort typed edges for one episode. Never raises."""
+        extractor = self._relation_extractor
+        if extractor is None:
+            return
+        try:
+            triples = await asyncio.to_thread(extractor.extract, content)
+        except Exception as exc:  # noqa: BLE001 - extraction is best-effort
+            log.warning("relation_extraction_failed", extra={"error": repr(exc)})
+            return
+        if not triples:
+            return
+        store = engine.storage
+        upsert = getattr(store, "upsert_entities", None)
+        add_edges = getattr(store, "add_entity_edges", None)
+        if upsert is None or add_edges is None:
+            return
+        entities: dict[str, Any] = {}
+        edges: list[EntityEdge] = []
+        for triple in triples:
+            subj = canonicalize(triple.subject)
+            obj = canonicalize(triple.object)
+            if subj is None or obj is None or subj.id == obj.id:
+                continue
+            entities[subj.id] = subj
+            entities[obj.id] = obj
+            edges.append(
+                EntityEdge(
+                    from_entity=subj.id,
+                    to_entity=obj.id,
+                    relation=triple.relation,
+                    weight=1.0,
+                )
+            )
+        if not edges:
+            return
+        try:
+            await upsert(list(entities.values()))
+            await add_edges(edges)
+        except Exception as exc:  # noqa: BLE001 - extraction is best-effort
+            log.warning("relation_extraction_store_failed", extra={"error": repr(exc)})
 
     def add_episodes(
         self, graph_id: str, items: list[dict[str, Any]]
@@ -266,18 +349,13 @@ class ReifyZepGraph:
         node_ids = {n["uuid"] for n in nodes}
         edges: list[dict[str, Any]] = []
         if list_edges is not None:
+            labels = {e["id"]: e["label"] for e in entities}
             for row in await list_edges(limit=1000):
                 if row["from_entity"] in node_ids and row["to_entity"] in node_ids:
                     edges.append(
-                        {
-                            "source": row["from_entity"],
-                            "target": row["to_entity"],
-                            "relation": row["relation"],
-                            "fact": (
-                                f"{row['from_entity']} {row['relation']} "
-                                f"{row['to_entity']}"
-                            ),
-                        }
+                        _edge_dict(
+                            row["from_entity"], row["to_entity"], row["relation"], labels
+                        )
                     )
         return nodes[:limit], edges[:limit]
 
@@ -302,15 +380,15 @@ class ReifyZepGraph:
     def get_node_edges(self, graph_id: str, uuid_: str) -> list[dict[str, Any]]:
         async def _edges() -> list[dict[str, Any]]:
             engine = await self._ensure_engine(graph_id)
-            rows = await engine.storage.neighbors(uuid_)
+            store = engine.storage
+            rows = await store.neighbors(uuid_)
+            labels: dict[str, str] = {uuid_: uuid_}
+            list_entities = getattr(store, "list_entities", None)
+            if list_entities is not None:
+                for entity in await list_entities(limit=1000):
+                    labels[entity["id"]] = entity["label"]
             return [
-                {
-                    "source": uuid_,
-                    "target": row.to_entity,
-                    "relation": row.relation,
-                    "fact": f"{uuid_} {row.relation} {row.to_entity}",
-                }
-                for row in rows
+                _edge_dict(uuid_, row.to_entity, row.relation, labels) for row in rows
             ]
 
         return self._run(_edges())
@@ -333,16 +411,15 @@ class ReifyZepGraph:
             list_edges = getattr(store, "list_edges", None)
             if list_edges is None:
                 return []
+            labels: dict[str, str] = {}
+            list_entities = getattr(store, "list_entities", None)
+            if list_entities is not None:
+                for entity in await list_entities(limit=1000):
+                    labels[entity["id"]] = entity["label"]
             return [
-                {
-                    "source": row["from_entity"],
-                    "target": row["to_entity"],
-                    "relation": row["relation"],
-                    "fact": (
-                        f"{row['from_entity']} {row['relation']} "
-                        f"{row['to_entity']}"
-                    ),
-                }
+                _edge_dict(
+                    row["from_entity"], row["to_entity"], row["relation"], labels
+                )
                 for row in await list_edges(limit=1000)
             ]
 
