@@ -423,6 +423,16 @@ class Reify:
             await self._reinforce_memories([r.memory for r in results], now=sweep_now)
         return RecallResponse(query=query, results=tuple(results))
 
+    @property
+    def storage(self) -> Storage:
+        """The underlying store (entity-graph reads live here)."""
+        return self._storage
+
+    async def get_memory(self, memory_id: str) -> Memory | None:
+        """Fetch one memory by id, or ``None``. Backs adapter lookups."""
+        self._require_started()
+        return await self._storage.get(memory_id)  # type: ignore[arg-type]
+
     async def recall_packed(
         self,
         text: str,

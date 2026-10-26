@@ -742,6 +742,48 @@ class SQLiteStore(Storage):
 
         return await asyncio.to_thread(_do)
 
+    async def list_entities(self, *, limit: int = 1000) -> list[dict[str, Any]]:
+        """All entities in the store, oldest first. Graph introspection."""
+        conn = self._require_conn()
+
+        def _do() -> list[dict[str, Any]]:
+            rows = conn.execute(
+                "SELECT id, label, kind FROM entities ORDER BY created_at LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [
+                {"id": r["id"], "label": r["label"], "kind": r["kind"]} for r in rows
+            ]
+
+        return await asyncio.to_thread(_do)
+
+    async def list_edges(self, *, limit: int = 1000) -> list[dict[str, Any]]:
+        """All entity edges, strongest first. Graph introspection."""
+        conn = self._require_conn()
+
+        def _do() -> list[dict[str, Any]]:
+            rows = conn.execute(
+                """
+                SELECT from_entity, to_entity, relation, weight, last_seen_at
+                FROM entity_edges
+                ORDER BY weight DESC, last_seen_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [
+                {
+                    "from_entity": r["from_entity"],
+                    "to_entity": r["to_entity"],
+                    "relation": r["relation"],
+                    "weight": float(r["weight"]),
+                    "last_seen_at": r["last_seen_at"],
+                }
+                for r in rows
+            ]
+
+        return await asyncio.to_thread(_do)
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
