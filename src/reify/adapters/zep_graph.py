@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import threading
 import uuid
 from pathlib import Path
@@ -74,6 +75,65 @@ def _node_dict(entity: dict[str, Any], summary: str = "") -> dict[str, Any]:
         "labels": [entity["kind"]] if entity.get("kind") else [],
         "summary": summary,
     }
+
+
+def _describe_mention(content: str, span_start: int, span_end: int) -> str:
+    """Best short description of an entity from its defining mention.
+
+    Takes the LINE containing the mention span: brief-style list items put
+    one person per line, so the line IS the description ("Maya Chen, 29,
+    beginner investor. Holds index funds..."). If the line is long prose,
+    narrows to the sentence containing the span. Bounded to 500 chars so
+    node summaries stay prompt-sized. The old content[:200] truncation
+    regularly cut mid-sentence and, for big chunks, described the wrong
+    subject entirely (product preamble instead of the person).
+    """
+    if not content:
+        return ""
+    span_start = max(0, min(span_start, len(content)))
+    span_end = max(span_start, min(span_end, len(content)))
+    line_start = content.rfind("\n", 0, span_start) + 1
+    line_end = content.find("\n", span_end)
+    if line_end == -1:
+        line_end = len(content)
+    line = content[line_start:line_end].strip(" \t-•*")
+    if len(line) > 300:
+        rel = span_start - line_start
+        bounds = [0]
+        bounds += [m.end() for m in re.finditer(r"[.!?]\s+", line)]
+        bounds.append(len(line))
+        for i in range(len(bounds) - 1):
+            if bounds[i] <= rel < bounds[i + 1]:
+                line = line[bounds[i]:bounds[i + 1]]
+                break
+    return line[:500].strip()
+
+
+async def _mention_summaries(store: Any, entity_ids: list[str]) -> dict[str, str]:
+    """entity_id -> sentence description from its earliest mention.
+
+    Uses stored mention spans (definitional-first order), so the summary
+    is the text that introduces the entity, not an arbitrary chunk head.
+    """
+    summaries: dict[str, str] = {}
+    mention_spans = getattr(store, "mention_spans", None)
+    if mention_spans is None or not entity_ids:
+        return summaries
+    spans = await mention_spans(entity_ids)
+    if not spans:
+        return summaries
+    wanted = {eid for eid, _, _, _ in spans}
+    memories = await store.memories_mentioning(list(wanted), limit=1000)
+    contents: dict[str, str] = {}
+    for mem, _eid, _conf in memories:
+        contents.setdefault(mem.id, mem.content)
+    seen: set[str] = set()
+    for eid, mid, start, end in spans:
+        if eid in seen or mid not in contents:
+            continue
+        seen.add(eid)
+        summaries[eid] = _describe_mention(contents[mid], start, end)
+    return summaries
 
 
 def _edge_dict(
@@ -335,14 +395,14 @@ class ReifyZepGraph:
         mentions = await store.memories_mentioning(
             [e["id"] for e in entities], limit=1000
         )
-        by_entity: dict[str, list[str]] = {}
-        for memory, entity_id, _conf in mentions:
-            by_entity.setdefault(entity_id, []).append(memory.content)
         episode_entity_ids = {
             eid for m, eid, _ in mentions if m.id in episode_ids
         }
+        summaries = await _mention_summaries(
+            store, [e["id"] for e in entities]
+        )
         nodes = [
-            _node_dict(e, summary=(by_entity.get(e["id"], [""])[0][:200]))
+            _node_dict(e, summary=summaries.get(e["id"], ""))
             for e in entities
             if e["id"] in episode_entity_ids
         ]
@@ -370,9 +430,10 @@ class ReifyZepGraph:
                 return None
             for entity in await list_entities(limit=1000):
                 if entity["id"] == uuid_:
-                    mentions = await store.memories_mentioning([uuid_], limit=1)
-                    summary = mentions[0][0].content[:200] if mentions else ""
-                    return _node_dict(entity, summary=summary)
+                    summaries = await _mention_summaries(store, [uuid_])
+                    return _node_dict(
+                        entity, summary=summaries.get(uuid_, "")
+                    )
             return None
 
         return self._run(_get())
@@ -400,7 +461,14 @@ class ReifyZepGraph:
             list_entities = getattr(store, "list_entities", None)
             if list_entities is None:
                 return []
-            return [_node_dict(e) for e in await list_entities(limit=1000)]
+            entities = await list_entities(limit=1000)
+            summaries = await _mention_summaries(
+                store, [e["id"] for e in entities]
+            )
+            return [
+                _node_dict(e, summary=summaries.get(e["id"], ""))
+                for e in entities
+            ]
 
         return self._run(_list())
 

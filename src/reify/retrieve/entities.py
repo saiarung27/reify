@@ -168,6 +168,12 @@ def classify_kind(label: str, *, hint: str | None = None) -> str:
     if any(tok in _LOCATION_HINTS for tok in tokens):
         return "location"
 
+    # All-caps acronym tokens (CPI, FOMC, NVTS, DM) are topics, not people:
+    # the old person default turned every ticker and initialism into a
+    # bogus persona candidate.
+    if len(tokens) == 1 and len(label) >= 2 and label.isupper() and label.isalpha():
+        return "topic"
+
     # Multi-word title-cased proper noun without role/org/location markers:
     # default to person if length 1-3 tokens, else topic.
     if 1 <= len(tokens) <= 3:
@@ -245,6 +251,66 @@ _BLOCK_TOKENS = frozenset({
     "July", "August", "September", "October", "November", "December",
 })
 
+# Single-token capitalized phrases that are common English words, not names.
+# Applied ONLY to single-token phrases from the free-text scan (multi-word
+# proper names such as "Maya Chen" are never affected, and Fact subjects
+# bypass this filter entirely -- they carry explicit semantics). Without
+# this, sentence-initial verbs and pronouns ("Holds index funds...",
+# "Checks her phone...", "It sends...") become bogus "person" entities and
+# downstream persona generation invents people for them. Ambiguous
+# name-words (Will, May, Mark, Bill, Frank, Grace, Hope, Summer) are
+# deliberately NOT listed: a real single first name must survive the scan.
+_COMMON_WORD_SINGLES = frozenset({
+    # Pronouns / question words / determiners / quantifiers.
+    "it", "he", "she", "they", "we", "you", "nobody", "everybody",
+    "everyone", "someone", "anyone", "somebody", "anybody", "himself",
+    "herself", "itself", "themselves", "ourselves", "yourself",
+    "whoever", "whatever", "whichever", "why", "what", "when", "where",
+    "which", "who", "whom", "whose", "how", "all", "any", "some", "none",
+    "more", "most", "other", "others", "another", "each", "every", "few",
+    "many", "much", "own", "same",
+    # Auxiliaries / modals. "will" IS listed despite also being a name:
+    # bare sentence-initial "Will" is overwhelmingly the verb ("Will test
+    # any claim..."), while a real person is introduced by full name
+    # ("Will Smith"), which this single-token filter never touches. May
+    # stays excluded: it is month-blocked already and a common name.
+    "will", "would", "can", "could", "shall", "should", "might", "must", "do",
+    "does", "did", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had",
+    # Adverbs.
+    "very", "just", "also", "still", "already", "even", "ever", "never",
+    "always", "often", "sometimes", "usually", "really", "actually",
+    "finally", "recently", "currently", "previously", "especially",
+    "particularly", "mainly", "mostly", "largely", "highly", "fully",
+    "entirely", "completely", "exactly", "nearly", "almost", "quite",
+    "rather", "pretty", "fairly", "somewhat", "slightly", "extremely",
+    # Common verbs / adjectives / nouns observed as sentence-start junk.
+    "want", "wants", "need", "needs", "use", "uses", "hold", "holds",
+    "check", "checks", "watch", "watches", "hate", "hates", "trust",
+    "trusts", "follow", "follows", "like", "likes", "know", "knows",
+    "think", "thinks", "get", "gets", "make", "makes", "take", "takes",
+    "see", "sees", "come", "comes", "go", "goes", "say", "says", "ask",
+    "asks", "try", "tries", "help", "helps", "show", "shows", "give",
+    "gives", "put", "puts", "keep", "keeps", "let", "lets", "feel",
+    "feels", "mean", "means", "become", "becomes", "leave", "leaves",
+    "bring", "brings", "happen", "happens", "write", "writes", "sit",
+    "sits", "stand", "stands", "lose", "loses", "pay", "pays", "meet",
+    "meets", "include", "includes", "continue", "continues", "set",
+    "sets", "learn", "learns", "change", "changes", "lead", "leads",
+    "understand", "understands", "read", "reads", "allow", "allows",
+    "add", "adds", "spend", "spends", "grow", "grows", "open", "opens",
+    "walk", "walks", "win", "wins", "offer", "offers", "remember",
+    "remembers", "love", "loves", "consider", "considers", "appear",
+    "appears", "buy", "buys", "wait", "waits", "serve", "serves",
+    "die", "dies", "send", "sends", "expect", "expects", "build",
+    "builds", "stay", "stays", "fall", "falls", "cut", "cuts", "reach",
+    "reaches", "kill", "kills", "remain", "remains", "suggest",
+    "suggests", "raise", "raises", "pass", "passes", "sell", "sells",
+    "require", "requires", "report", "reports", "decide", "decides",
+    "pull", "pulls", "afraid", "skeptical", "privacy", "free", "paid",
+    "launch", "pick", "levels", "people", "questions",
+})
+
 
 def _extract_capitalized_phrases(text: str) -> list[tuple[str, int, int]]:
     """Return ``(surface, span_start, span_end)`` for capitalized phrases.
@@ -259,6 +325,8 @@ def _extract_capitalized_phrases(text: str) -> list[tuple[str, int, int]]:
             continue
         first_token = phrase.split()[0]
         if first_token in _BLOCK_TOKENS and " " not in phrase:
+            continue
+        if " " not in phrase and phrase.lower() in _COMMON_WORD_SINGLES:
             continue
         out.append((phrase, match.start("phrase"), match.end("phrase")))
     return out

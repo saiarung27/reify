@@ -11,10 +11,12 @@ Design notes
   implementation: the type system has five networks, the storage layer
   has one table.
 * **WAL journaling** for crash safety and concurrent readers.
-* **Async surface, sync underneath.** SQLite is synchronous; we wrap each
-  call in :func:`asyncio.to_thread` and serialize writes with an
+* **Async surface, sync underneath.** SQLite is synchronous; we route
+  each call through the store's single-worker executor (see
+  :meth:`SQLiteStore._run_blocking`) and serialize writes with an
   ``asyncio.Lock`` so the public API can be awaited from anywhere without
-  blocking the event loop.
+  blocking the event loop, and the one connection is never used
+  concurrently from two threads.
 * **Vector search is brute-force cosine for v0.** sqlite-vec wiring lands
   when the volume justifies it. For the wedge demo the metadata-first
   recall path does not require vector search at all.
@@ -27,11 +29,14 @@ import json
 import math
 import sqlite3
 import struct
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timezone
 from importlib import resources
 from pathlib import Path
-from typing import Any, cast
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, TypeVar, cast
+
+_T = TypeVar("_T")
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -125,6 +130,33 @@ class SQLiteStore(Storage):
         self._path = str(path)
         self._conn: sqlite3.Connection | None = None
         self._write_lock = asyncio.Lock()
+        # Single-worker executor for ALL blocking SQLite work (see
+        # _run_blocking). Created lazily; see close().
+        self._executor: ThreadPoolExecutor | None = None
+
+    # ------------------------------------------------------------------
+    # Blocking-work executor: the store owns ONE sqlite3 connection with
+    # check_same_thread=False. That flag permits cross-thread use but does
+    # NOT make concurrent use safe: two coroutines awaiting storage at
+    # once used to run their _do bodies on different default-executor
+    # threads, and concurrent conn.execute calls raised
+    # sqlite3.InterfaceError ("bad parameter or other API misuse"). Seen
+    # live when profile generation ran parallel graph searches, silently
+    # degrading personas to bare fallbacks. Routing every blocking call
+    # through one single-worker executor means the connection is ever
+    # touched by exactly one thread.
+    # ------------------------------------------------------------------
+
+    def _ensure_executor(self) -> ThreadPoolExecutor:
+        if self._executor is None:
+            self._executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="reify-store"
+            )
+        return self._executor
+
+    async def _run_blocking(self, fn: Callable[[], _T]) -> _T:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(self._ensure_executor(), fn)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -167,13 +199,16 @@ class SQLiteStore(Storage):
             )
             return conn
 
-        self._conn = await asyncio.to_thread(_open)
+        self._conn = await self._run_blocking(_open)
 
     async def close(self) -> None:
         """Close the underlying connection. Idempotent."""
         conn, self._conn = self._conn, None
         if conn is not None:
-            await asyncio.to_thread(conn.close)
+            await self._run_blocking(conn.close)
+        executor, self._executor = self._executor, None
+        if executor is not None:
+            executor.shutdown(wait=True)
 
     # ------------------------------------------------------------------
     # Writes
@@ -203,7 +238,7 @@ class SQLiteStore(Storage):
                 raise StorageError(f"commit_batch failed: {exc}") from exc
 
         async with self._write_lock:
-            await asyncio.to_thread(_do)
+            await self._run_blocking(_do)
 
     async def attach_embedding(
         self,
@@ -236,7 +271,7 @@ class SQLiteStore(Storage):
                 ) from exc
 
         async with self._write_lock:
-            await asyncio.to_thread(_do)
+            await self._run_blocking(_do)
 
     async def soft_delete(self, memory_id: MemoryId, *, at: datetime | None = None) -> None:
         """Tombstone a memory. Idempotent on subsequent calls."""
@@ -259,7 +294,7 @@ class SQLiteStore(Storage):
                     raise UnknownMemoryError(memory_id)
 
         async with self._write_lock:
-            await asyncio.to_thread(_do)
+            await self._run_blocking(_do)
 
     async def bind_valid_until(self, memory_id: MemoryId, valid_until: datetime) -> None:
         """Bind a memory's validity end time (bitemporal)."""
@@ -280,7 +315,7 @@ class SQLiteStore(Storage):
                     raise UnknownMemoryError(f"Memory {memory_id} not found. Cannot bind valid_until to non-existent memory.")
 
         async with self._write_lock:
-            await asyncio.to_thread(_do)
+            await self._run_blocking(_do)
 
     async def update_metadata(self, memory_id: MemoryId, metadata: dict[str, Any]) -> None:
         """Replace a memory's metadata blob."""
@@ -296,7 +331,7 @@ class SQLiteStore(Storage):
                 raise UnknownMemoryError(memory_id)
 
         async with self._write_lock:
-            await asyncio.to_thread(_do)
+            await self._run_blocking(_do)
 
     async def soft_delete_matching(
         self,
@@ -332,7 +367,7 @@ class SQLiteStore(Storage):
             return int(cur.rowcount)
 
         async with self._write_lock:
-            return await asyncio.to_thread(_do)
+            return await self._run_blocking(_do)
 
     async def sweep_expired(self, *, now: datetime | None = None) -> int:
         """Tombstone memories whose retention expiry is in the past."""
@@ -353,7 +388,7 @@ class SQLiteStore(Storage):
             return int(cur.rowcount)
 
         async with self._write_lock:
-            return await asyncio.to_thread(_do)
+            return await self._run_blocking(_do)
 
     async def expired_memory_ids(self, *, now: datetime | None = None) -> list[MemoryId]:
         """Return ids of memories whose retention expiry is in the past."""
@@ -374,7 +409,7 @@ class SQLiteStore(Storage):
             ).fetchall()
             return [cast(MemoryId, row["id"]) for row in rows]
 
-        return await asyncio.to_thread(_do)
+        return await self._run_blocking(_do)
 
     # ------------------------------------------------------------------
     # Reads
@@ -392,7 +427,7 @@ class SQLiteStore(Storage):
             provenance = self._load_provenance(conn, memory_id)
             return self._row_to_memory(row, provenance)
 
-        return await asyncio.to_thread(_do)
+        return await self._run_blocking(_do)
 
     async def recall(self, filter_: RecallFilter, *, limit: int = 50) -> list[Memory]:
         """Metadata-first recall.
@@ -412,7 +447,7 @@ class SQLiteStore(Storage):
             rows = conn.execute(sql, params).fetchall()
             return [self._row_to_memory(r, self._load_provenance(conn, r["id"])) for r in rows]
 
-        return await asyncio.to_thread(_do)
+        return await self._run_blocking(_do)
 
     async def vector_search(
         self,
@@ -454,7 +489,7 @@ class SQLiteStore(Storage):
             scored.sort(key=lambda pair: pair[1])
             return scored[:limit]
 
-        return await asyncio.to_thread(_do)
+        return await self._run_blocking(_do)
 
     # ------------------------------------------------------------------
     # Transitions
@@ -502,7 +537,7 @@ class SQLiteStore(Storage):
             rows = conn.execute(sql, params).fetchall()
             return [self._row_to_transition(r) for r in rows]
 
-        return await asyncio.to_thread(_do)
+        return await self._run_blocking(_do)
 
     # ------------------------------------------------------------------
     # Identity bonds
@@ -541,7 +576,7 @@ class SQLiteStore(Storage):
                 for r in rows
             ]
 
-        return await asyncio.to_thread(_do)
+        return await self._run_blocking(_do)
 
     # ------------------------------------------------------------------
     # Entity graph (v0.3)
@@ -581,7 +616,7 @@ class SQLiteStore(Storage):
                 raise StorageError(f"upsert_entities failed: {exc}") from exc
 
         async with self._write_lock:
-            await asyncio.to_thread(_do)
+            await self._run_blocking(_do)
 
     async def add_entity_mentions(self, mentions: Sequence[Any]) -> None:
         """Persist entity mentions. Existing (memory, entity, span) rows are
@@ -617,7 +652,7 @@ class SQLiteStore(Storage):
                 raise StorageError(f"add_entity_mentions failed: {exc}") from exc
 
         async with self._write_lock:
-            await asyncio.to_thread(_do)
+            await self._run_blocking(_do)
 
     async def add_entity_edges(self, edges: Sequence[Any]) -> None:
         """Insert or merge weighted edges. Re-observed edges have their
@@ -654,7 +689,7 @@ class SQLiteStore(Storage):
                 raise StorageError(f"add_entity_edges failed: {exc}") from exc
 
         async with self._write_lock:
-            await asyncio.to_thread(_do)
+            await self._run_blocking(_do)
 
     async def entities_by_ids(self, ids: Sequence[str]) -> list[str]:
         if not ids:
@@ -669,7 +704,7 @@ class SQLiteStore(Storage):
             ).fetchall()
             return [r["id"] for r in rows]
 
-        return await asyncio.to_thread(_do)
+        return await self._run_blocking(_do)
 
     async def neighbors(self, entity_id: str, *, limit: int = 32) -> list[Any]:
         from reify.retrieve.graph import _Edge  # local to avoid circular at import time
@@ -695,7 +730,7 @@ class SQLiteStore(Storage):
                 for r in rows
             ]
 
-        return await asyncio.to_thread(_do)
+        return await self._run_blocking(_do)
 
     async def memories_mentioning(
         self,
@@ -740,7 +775,39 @@ class SQLiteStore(Storage):
                 out.append((mem, r["_entity_id"], float(r["_conf"])))
             return out
 
-        return await asyncio.to_thread(_do)
+        return await self._run_blocking(_do)
+
+    async def mention_spans(
+        self, entity_ids: Sequence[str]
+    ) -> list[tuple[str, str, int, int]]:
+        """Mention spans per entity, definitional (oldest) first.
+
+        Returns (entity_id, memory_id, span_start, span_end) rows. The
+        adapter uses the first span per entity to build a sentence-level
+        node description from the memory that introduces the entity.
+        """
+        if not entity_ids:
+            return []
+        conn = self._require_conn()
+        placeholders = ",".join("?" for _ in entity_ids)
+        sql = f"""
+            SELECT em.entity_id AS _entity_id, em.memory_id AS _memory_id,
+                   em.span_start AS _start, em.span_end AS _end
+            FROM entity_mentions em
+            INNER JOIN memories m ON m.id = em.memory_id
+            WHERE em.entity_id IN ({placeholders})
+              AND m.soft_deleted_at IS NULL
+            ORDER BY m.created_at ASC, em.span_start ASC
+        """
+
+        def _do() -> list[tuple[str, str, int, int]]:
+            rows = conn.execute(sql, list(entity_ids)).fetchall()
+            return [
+                (r["_entity_id"], r["_memory_id"], int(r["_start"]), int(r["_end"]))
+                for r in rows
+            ]
+
+        return await self._run_blocking(_do)
 
     async def list_entities(self, *, limit: int = 1000) -> list[dict[str, Any]]:
         """All entities in the store, oldest first. Graph introspection."""
@@ -755,7 +822,7 @@ class SQLiteStore(Storage):
                 {"id": r["id"], "label": r["label"], "kind": r["kind"]} for r in rows
             ]
 
-        return await asyncio.to_thread(_do)
+        return await self._run_blocking(_do)
 
     async def list_edges(self, *, limit: int = 1000) -> list[dict[str, Any]]:
         """All entity edges, strongest first. Graph introspection."""
@@ -782,7 +849,7 @@ class SQLiteStore(Storage):
                 for r in rows
             ]
 
-        return await asyncio.to_thread(_do)
+        return await self._run_blocking(_do)
 
     # ------------------------------------------------------------------
     # Internals
