@@ -288,6 +288,10 @@ _COMMON_WORD_SINGLES = frozenset({
     "want", "wants", "need", "needs", "use", "uses", "hold", "holds",
     "check", "checks", "watch", "watches", "hate", "hates", "trust",
     "trusts", "follow", "follows", "like", "likes", "know", "knows",
+    # Added 2026-10-27 by live validation evidence: the Telegram rerun
+    # graph still produced "Dislikes" / "Compares" / "Invests" person
+    # nodes from sentence-initial verbs the original list missed.
+    "dislike", "dislikes", "compare", "compares", "invest", "invests",
     "think", "thinks", "get", "gets", "make", "makes", "take", "takes",
     "see", "sees", "come", "comes", "go", "goes", "say", "says", "ask",
     "asks", "try", "tries", "help", "helps", "show", "shows", "give",

@@ -29,6 +29,14 @@ BRIEF = (
     "Hates noisy alerts and unsubscribes fast when spammed.\n"
     "- Marcus Webb, 38, former day trader. Trusts charts, not tips. "
     "Will test any levels claim against real price history.\n"
+    # Regression lines (2026-10-27 live rerun): sentence-initial verbs
+    # that the first junk list missed became "person" nodes.
+    "- Ben Ortiz, 47, manages a family portfolio. Privacy conscious. "
+    "Dislikes spam and dislikes group chats.\n"
+    "- Sara Lindqvist, 28, tech worker. Compares every new tool to the "
+    "free alerts already inside her broker app.\n"
+    "- David Okafor, 44, small-business owner. Invests weekly. Wants "
+    "instant push alerts when a stock he watches spikes.\n"
     "CPI and FOMC decisions move markets. NVTS is a watched ticker.\n"
 )
 
@@ -46,9 +54,11 @@ def test_sentence_start_common_words_are_not_entities() -> None:
     for junk in (
         "it", "holds", "checks", "afraid", "watches", "hates", "trusts",
         "will", "nobody", "would", "why", "what", "questions",
+        "dislikes", "compares", "invests",
     ):
         assert junk not in kinds, f"{junk!r} must not become an entity"
-    for person in ("maya_chen", "darnell_brooks", "marcus_webb"):
+    for person in ("maya_chen", "darnell_brooks", "marcus_webb",
+                   "ben_ortiz", "sara_lindqvist", "david_okafor"):
         assert person in kinds, f"{person!r} must survive the filter"
         assert kinds[person] == "person"
 
